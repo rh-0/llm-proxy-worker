@@ -57,7 +57,7 @@ export default {
             modifiedResponse.headers.set('Access-Control-Allow-Credentials', 'true');
 
             return modifiedResponse;
-        } catch ( error) {
+        } catch (error) {
             console.error(`将请求代理到时出错: `, error);
             return new Response(`将请求代理到时出错: ${error.message}`, {status: 500});
         } finally {
