@@ -6,6 +6,15 @@
 
 export default {
     async fetch(request, env, ctx) {
+        // 过滤 Cloudflare 健康检查 / 预热请求
+        const ua = request.headers.get('user-agent') || '';
+        const cfRay = request.headers.get('cf-ray') || '';
+        if (ua.includes('cloudflare-healthcheck') ||
+            request.headers.get('cf-visitor')?.includes('healthcheck')) {
+            // 直接返回，不计数
+            return new Response('OK', { status: 200 });
+        }
+
         const apiKey = JSON.parse(env.AIP_KEY);
 
         // 打印传入参数
@@ -29,8 +38,8 @@ export default {
         }
         try {
             await waitLock(env);
-            // 延迟4秒
-            await new Promise(r => setTimeout(r, 4000));
+            // 延迟1秒
+            await new Promise(r => setTimeout(r, 1000));
             let count = await getNextKeyIndex(env);
             // 使用AIP_KEY数组中的值依次替换
             const selectApiKey = apiKey[count % apiKey.length];
@@ -42,24 +51,33 @@ export default {
             });
             console.log(`发送的请求标头: ${JSON.stringify(Object.fromEntries(cleanedHeaders.entries()), null, 2)}`);
             const response = await fetch(modifiedRequest);
-            // 克隆一份专门用于打印日志，避免消费原始响应流
-            const clonedResponse = response.clone();
-            console.log(`收到 response 的状态: ${clonedResponse.status}`);
-            console.log(`收到 response 的内容: ${await clonedResponse.text()}`);
+            // 克隆一份专门用于打印日志，避免消费原始响应流, 仅调试使用会阻塞流式响应
+            // const clonedResponse = response.clone();
+            // console.log(`收到 response 的状态: ${clonedResponse.status}`);
+            //console.log(`收到 response 的内容: ${await clonedResponse.text()}`);
 
             // 使用CORS标头创建新响应
-            const modifiedResponse = new Response(response.body, {
-                status: response.status, statusText: response.statusText, headers: response.headers
+            // const modifiedResponse = new Response(response.body, {
+            //     status: response.status, statusText: response.statusText, headers: response.headers
+            // });
+            //
+            // // 添加CORS标头
+            // modifiedResponse.headers.set('Access-Control-Allow-Origin', request.headers.get('Origin') || '*');
+            // modifiedResponse.headers.set('Access-Control-Allow-Credentials', 'true');
+            //
+            // return modifiedResponse;
+
+            const headers = new Headers(response.headers);
+            headers.set('Access-Control-Allow-Origin', request.headers.get('Origin') || '*');
+            headers.set('Access-Control-Allow-Credentials', 'true');
+            return new Response(response.body, {
+                status: response.status,
+                statusText: response.statusText,
+                headers
             });
-
-            // 添加CORS标头
-            modifiedResponse.headers.set('Access-Control-Allow-Origin', request.headers.get('Origin') || '*');
-            modifiedResponse.headers.set('Access-Control-Allow-Credentials', 'true');
-
-            return modifiedResponse;
         } catch (error) {
-            console.error(`将请求代理到时出错: `, error);
-            return new Response(`将请求代理到时出错: ${error.message}`, {status: 500});
+            console.error(`代理出错: `, error);
+            return new Response(`代理出错: ${error.message}`, {status: 500});
         } finally {
             await releaseLock(env);
         }
@@ -81,10 +99,10 @@ function handleCORS(request) {
     });
 }
 
-// 修改URL为 https://api.cerebras.ai
+// 修改URL为 https://openrouter.ai
 function modifyURL(request) {
     const originalUrl = new URL(request.url);
-    const modifyUrl = new URL('https://api.cerebras.ai');
+    const modifyUrl = new URL('https://openrouter.ai');
     modifyUrl.pathname = originalUrl.pathname;
     modifyUrl.search = originalUrl.search;
     console.log(`原始URL: ${originalUrl.toString()}`);
