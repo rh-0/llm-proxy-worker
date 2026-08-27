@@ -1,5 +1,5 @@
 // 使用cloudflare将cc switch请求转发相应的ai api提供商
-// 轮训使用多个api key
+// 轮训使用多个api key 例: ["key1","key2","key3","key4"]
 // 环境变量 AIP_KEY, REDIS_URL(redis的url), REDIS_TOKEN(redis的token)
 // redis官网: https://console.upstash.com/
 
