@@ -1,18 +1,32 @@
-// 使用cloudflare将cc switch请求转发相应的ai api提供商
-// 轮训使用多个api key 例: ["key1","key2","key3","key4"]
-// 环境变量 AIP_KEY, REDIS_URL(redis的url), REDIS_TOKEN(redis的token)
+// Cloudflare Worker：转发到 OpenRouter，多 Key 轮询
+// 环境变量：
+//   AIP_KEY      - JSON 数组字符串，如 ["sk-or-1","sk-or-2"]
+//   CLIENT_KEYS  - JSON 数组字符串，客户端可使用的 Key，如 ["my-client-key-1","my-client-key-2"] 简单鉴权
+//   REDIS_URL    - Upstash Redis REST URL
+//   REDIS_TOKEN  - Upstash Redis token
 // redis官网: https://console.upstash.com/
 
 
 export default {
     async fetch(request, env, ctx) {
-        // 过滤 Cloudflare 健康检查 / 预热请求
-        const ua = request.headers.get('user-agent') || '';
-        const cfRay = request.headers.get('cf-ray') || '';
-        if (ua.includes('cloudflare-healthcheck') ||
-            request.headers.get('cf-visitor')?.includes('healthcheck')) {
-            // 直接返回，不计数
-            return new Response('OK', { status: 200 });
+        // ---------- 简单鉴权：没有合法客户端 Key → 直接拒绝 ---------- 
+        const clientKeys = parseJsonArray(env.CLIENT_KEYS);
+        if (!clientKeys.length) {
+            console.error("CLIENT_KEYS 未配置或为空");
+            return new Response("服务器配置错误: CLIENT_KEYS", { status: 500 });
+        }
+
+        const authHeader = request.headers.get("Authorization") || "";
+        const clientKey = extractBearer(authHeader);
+
+        if (!clientKey || !clientKeys.includes(clientKey)) {
+            return withCORS(
+            request,
+            new Response(JSON.stringify({ error: "Unauthorized" }), {
+                status: 401,
+                headers: { "Content-Type": "application/json" },
+            })
+            );
         }
 
         const apiKey = JSON.parse(env.AIP_KEY);
@@ -38,8 +52,8 @@ export default {
         }
         try {
             await waitLock(env);
-            // 延迟1秒
-            await new Promise(r => setTimeout(r, 1000));
+            // 延迟1秒 1000
+            await new Promise(r => setTimeout(r, 1));
             let count = await getNextKeyIndex(env);
             // 使用AIP_KEY数组中的值依次替换
             const selectApiKey = apiKey[count % apiKey.length];
@@ -55,21 +69,7 @@ export default {
             // const clonedResponse = response.clone();
             // console.log(`收到 response 的状态: ${clonedResponse.status}`);
             //console.log(`收到 response 的内容: ${await clonedResponse.text()}`);
-
-            // 使用CORS标头创建新响应
-            // const modifiedResponse = new Response(response.body, {
-            //     status: response.status, statusText: response.statusText, headers: response.headers
-            // });
-            //
-            // // 添加CORS标头
-            // modifiedResponse.headers.set('Access-Control-Allow-Origin', request.headers.get('Origin') || '*');
-            // modifiedResponse.headers.set('Access-Control-Allow-Credentials', 'true');
-            //
-            // return modifiedResponse;
-
             const headers = new Headers(response.headers);
-            headers.set('Access-Control-Allow-Origin', request.headers.get('Origin') || '*');
-            headers.set('Access-Control-Allow-Credentials', 'true');
             return new Response(response.body, {
                 status: response.status,
                 statusText: response.statusText,
@@ -84,8 +84,8 @@ export default {
     }
 };
 
+// 处理 CORS 预检请求
 function handleCORS(request) {
-    // 处理 CORS 预检请求
     const corsHeaders = {
         'Access-Control-Allow-Origin': request.headers.get('Origin') || '*',
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
@@ -122,7 +122,7 @@ async function redisCommand(env, command) {
 
 // 上锁
 async function acquireLock(env) {
-    const result = await redisCommand(env, ["SET", "ai_lock", Date.now(), "NX", "EX", 10]);
+    const result = await redisCommand(env, ["SET", "cloudflare:openrouter:ai_lock", Date.now(), "NX", "EX", 10]);
     return result.result === "OK";
 }
 
@@ -139,14 +139,52 @@ async function waitLock(env) {
 
 // 解锁
 async function releaseLock(env) {
-    await redisCommand(env, ["DEL", "ai_lock"]);
+    await redisCommand(env, ["DEL", "cloudflare:openrouter:ai_lock"]);
 
 }
 
 // 原子递增函数
 async function getNextKeyIndex(env) {
     // INCR 会自动加 1 并返回新值，不需要先 GET
-    const result = await redisCommand(env, ["INCR", "count"]);
+    const result = await redisCommand(env, ["INCR", "cloudflare:openrouter:count"]);
     // INCR 返回的是字符串数字，需要转为整数
     return parseInt(result.result);
+}
+
+function parseJsonArray(raw) {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string" && x) : [];
+  } catch {
+    return [];
+  }
+}
+
+function extractBearer(authHeader) {
+  const m = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
+  return m ? m[1].trim() : "";
+}
+
+function withCORS(request, response) {
+  const headers = new Headers(response.headers);
+  const c = corsHeaders(request);
+  for (const [k, v] of Object.entries(c)) headers.set(k, v);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function corsHeaders(request) {
+  return {
+    "Access-Control-Allow-Origin": request.headers.get("Origin") || "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers":
+      request.headers.get("Access-Control-Request-Headers") ||
+      "Content-Type, Authorization",
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Max-Age": "4096",
+  };
 }
